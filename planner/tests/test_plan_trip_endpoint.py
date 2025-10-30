@@ -47,3 +47,4 @@ def test_plan_trip_missing_fields(client):
     assert res.status_code == 400
 
 
+

@@ -2,8 +2,9 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework import status
 
-from .serializers import PlanTripRequestSerializer, PlanTripResponseSerializer
+from .serializers import PlanTripRequestSerializer, PlanTripResponseSerializer, TripSerializer
 from .services.route_service import RouteService, RouteServiceError
+from .models import Trip
 
 
 class HealthCheckView(APIView):
@@ -43,6 +44,22 @@ class PlanTripView(APIView):
             "segments": route["segments"],
             "stops": stops,
         }
+
+        # Optionally persist if requested
+        if request.query_params.get("save") in {"1", "true", "True"}:
+            trip = Trip.objects.create(
+                current_lat=payload["current_location"]["lat"],
+                current_lon=payload["current_location"]["lon"],
+                pickup_lat=payload["pickup_location"]["lat"],
+                pickup_lon=payload["pickup_location"]["lon"],
+                dropoff_lat=payload["dropoff_location"]["lat"],
+                dropoff_lon=payload["dropoff_location"]["lon"],
+                current_cycle_hours_used=payload["current_cycle_hours_used"],
+                planned_distance_m=route["distance_m"],
+                planned_duration_s=adjusted_duration_s,
+                geometry=route["geometry"],
+            )
+            output["trip"] = TripSerializer(trip).data
 
         response_serializer = PlanTripResponseSerializer(data=output)
         response_serializer.is_valid(raise_exception=True)
