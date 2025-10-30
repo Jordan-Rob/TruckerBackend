@@ -5,6 +5,7 @@ from rest_framework import status
 from .serializers import PlanTripRequestSerializer, PlanTripResponseSerializer, TripSerializer
 from .services.route_service import RouteService, RouteServiceError
 from .models import Trip
+from .services.eld_service import generate_eld_logs
 
 
 class HealthCheckView(APIView):
@@ -61,6 +62,33 @@ class PlanTripView(APIView):
             )
             output["trip"] = TripSerializer(trip).data
 
-        response_serializer = PlanTripResponseSerializer(data=output)
-        response_serializer.is_valid(raise_exception=True)
-        return Response(response_serializer.data)
+        # Return the structured output directly to preserve read-only fields like trip.id
+        return Response(output)
+
+
+class ELDLogsView(APIView):
+    def get(self, request):
+        """
+        Generate logs from either a trip id or a provided duration_s.
+        - Query: trip_id=<id> OR duration_s=<seconds>
+        - Optional: save=1 with trip_id to persist ELDLog rows in future iteration
+        """
+        trip_id = request.query_params.get("trip_id")
+        duration_s = request.query_params.get("duration_s")
+        if not trip_id and not duration_s:
+            return Response({"detail": "Provide trip_id or duration_s"}, status=status.HTTP_400_BAD_REQUEST)
+
+        if trip_id:
+            try:
+                trip = Trip.objects.get(id=trip_id)
+            except Trip.DoesNotExist:
+                return Response({"detail": "Trip not found"}, status=status.HTTP_404_NOT_FOUND)
+            total_s = float(trip.planned_duration_s)
+        else:
+            try:
+                total_s = float(duration_s)
+            except (TypeError, ValueError):
+                return Response({"detail": "Invalid duration_s"}, status=status.HTTP_400_BAD_REQUEST)
+
+        logs = generate_eld_logs(total_s)
+        return Response({"days": logs})
