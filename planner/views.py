@@ -23,16 +23,22 @@ class PlanTripView(APIView):
         payload = serializer.validated_data
 
         coordinates = [
-            (payload["current_location"]["lat"], payload["current_location"]["lon"]),
-            (payload["pickup_location"]["lat"], payload["pickup_location"]["lon"]),
-            (payload["dropoff_location"]["lat"], payload["dropoff_location"]["lon"]),
+            (payload["current_location"]["lon"], payload["current_location"]["lat"]),
+            (payload["pickup_location"]["lon"], payload["pickup_location"]["lat"]),
+            (payload["dropoff_location"]["lon"], payload["dropoff_location"]["lat"]),
         ]
 
         route_service = RouteService()
         try:
             route = route_service.get_route(coordinates)
         except RouteServiceError as exc:
-            return Response({"detail": str(exc)}, status=status.HTTP_502_BAD_GATEWAY)
+            error_msg = str(exc)
+            if "ORS_API_KEY" in error_msg:
+                return Response(
+                    {"detail": "OpenRouteService API key not configured. Please set ORS_API_KEY in backend/.env"},
+                    status=status.HTTP_503_SERVICE_UNAVAILABLE
+                )
+            return Response({"detail": f"Route service error: {error_msg}"}, status=status.HTTP_502_BAD_GATEWAY)
 
         # Add 1h for pickup and 1h for dropoff to overall time context (not geometry)
         adjusted_duration_s = route["duration_s"] + 2 * 3600
