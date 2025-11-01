@@ -78,17 +78,49 @@ def generate_day_segments(remaining_drive_hours: float) -> List[LogSegment]:
     return segments
 
 
-def generate_eld_logs(total_drive_seconds: float) -> List[Dict]:
+def generate_eld_logs(total_drive_seconds: float, current_cycle_hours_used: float = 0.0) -> List[Dict]:
     """
-    Produce a list of daily logs. Each log contains drawable segments.
-    Input is total driving seconds from the trip plan (plus any service time accounted outside).
+    Produce a list of daily logs following property-carrying driver rules:
+    - 70 hours maximum within any rolling 8-day period
+    - Up to 11 hours driving per day
+    - 14-hour duty window per day
+    
+    Args:
+        total_drive_seconds: Total driving seconds needed for trip
+        current_cycle_hours_used: Hours already used in current 70-hour cycle
     """
+    # Property-carrying driver limits (70hr/8day cycle)
+    MAX_CYCLE_HOURS = 70.0
+    MAX_DAILY_DRIVE = 11.0
+    
     remaining_hours = max(0.0, total_drive_seconds / 3600.0)
+    cycle_hours_remaining = max(0.0, MAX_CYCLE_HOURS - current_cycle_hours_used)
     days: List[Dict] = []
+    cumulative_drive_hours = 0.0
 
-    while True:
-        day_drive = min(remaining_hours, 11.0)
-        segments = generate_day_segments(remaining_hours)
+    # Generate per-day segments while there is driving to allocate
+    # Respect both daily limit (11h) and cycle limit (70h total including current_cycle_hours_used)
+    while remaining_hours > 0.0001 and cumulative_drive_hours < cycle_hours_remaining:
+        # Cannot exceed daily limit or remaining cycle hours
+        available_today = min(MAX_DAILY_DRIVE, cycle_hours_remaining - cumulative_drive_hours)
+        day_drive = min(remaining_hours, available_today)
+        
+        # If we hit the 70-hour limit, driver needs 34-hour reset
+        if cumulative_drive_hours + day_drive >= cycle_hours_remaining and remaining_hours > 0.001:
+            # Add a reset day (34 hours off-duty)
+            reset_segments = [LogSegment(0.0, 24.0, 1)]
+            days.append({
+                "segments": [
+                    {"start": s.start_hour, "end": s.end_hour, "status": s.status}
+                    for s in reset_segments
+                ],
+                "note": "34-hour reset required after 70-hour cycle",
+            })
+            # Reset cycle hours after 34-hour break
+            cycle_hours_remaining = MAX_CYCLE_HOURS
+            cumulative_drive_hours = 0.0
+        
+        segments = generate_day_segments(day_drive)
         days.append(
             {
                 "segments": [
@@ -98,8 +130,30 @@ def generate_eld_logs(total_drive_seconds: float) -> List[Dict]:
             }
         )
         remaining_hours -= day_drive
-        if remaining_hours <= 0.0001:
-            break
+        cumulative_drive_hours += day_drive
+
+    # If remaining hours exceed cycle limit, indicate reset needed
+    if remaining_hours > 0.001:
+        reset_segments = [LogSegment(0.0, 24.0, 1)]
+        days.append({
+            "segments": [
+                {"start": s.start_hour, "end": s.end_hour, "status": s.status}
+                for s in reset_segments
+            ],
+            "note": "34-hour reset required - 70-hour cycle limit reached",
+        })
+
+    # Ensure at least one day appears even when there is 0 drive time
+    if not days:
+        segments = generate_day_segments(0.0)
+        days.append(
+            {
+                "segments": [
+                    {"start": s.start_hour, "end": s.end_hour, "status": s.status}
+                    for s in segments
+                ]
+            }
+        )
 
     return days
 

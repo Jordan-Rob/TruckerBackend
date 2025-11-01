@@ -3,7 +3,7 @@ from rest_framework.views import APIView
 from rest_framework import status
 
 from .serializers import PlanTripRequestSerializer, PlanTripResponseSerializer, TripSerializer
-from .services.route_service import RouteService, RouteServiceError
+from .services.route_service import RouteService, RouteServiceError, NotRoutableError
 from .models import Trip
 from .services.eld_service import generate_eld_logs
 
@@ -22,15 +22,33 @@ class PlanTripView(APIView):
         serializer.is_valid(raise_exception=True)
         payload = serializer.validated_data
 
+        def normalize_lat_lon(lat: float, lon: float) -> tuple[float, float]:
+            """Return a best-effort (lat, lon) pair.
+            - If values look swapped (abs(lat) > 90 and abs(lon) <= 90), swap them.
+            - Otherwise return as-is.
+            """
+            if abs(lat) > 90 and abs(lon) <= 90:
+                return lon, lat
+            return lat, lon
+
         coordinates = [
-            (payload["current_location"]["lon"], payload["current_location"]["lat"]),
-            (payload["pickup_location"]["lon"], payload["pickup_location"]["lat"]),
-            (payload["dropoff_location"]["lon"], payload["dropoff_location"]["lat"]),
+            normalize_lat_lon(payload["current_location"]["lat"], payload["current_location"]["lon"]),
+            normalize_lat_lon(payload["pickup_location"]["lat"], payload["pickup_location"]["lon"]),
+            normalize_lat_lon(payload["dropoff_location"]["lat"], payload["dropoff_location"]["lon"]),
         ]
 
         route_service = RouteService()
         try:
             route = route_service.get_route(coordinates)
+        except NotRoutableError as exc:
+            return Response(
+                {
+                    "detail": "No truck-legal roads found near one or more points.",
+                    "hint": "Move the marker closer to a public road or adjust to a nearby address. Some roads restrict HGV access.",
+                    "reason": str(exc),
+                },
+                status=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            )
         except RouteServiceError as exc:
             error_msg = str(exc)
             if "ORS_API_KEY" in error_msg:
@@ -77,24 +95,30 @@ class ELDLogsView(APIView):
         """
         Generate logs from either a trip id or a provided duration_s.
         - Query: trip_id=<id> OR duration_s=<seconds>
-        - Optional: save=1 with trip_id to persist ELDLog rows in future iteration
+        - Uses current_cycle_hours_used from trip or query param for 70hr/8day cycle enforcement
         """
         trip_id = request.query_params.get("trip_id")
         duration_s = request.query_params.get("duration_s")
         if not trip_id and not duration_s:
             return Response({"detail": "Provide trip_id or duration_s"}, status=status.HTTP_400_BAD_REQUEST)
 
+        current_cycle_hours = 0.0
         if trip_id:
             try:
                 trip = Trip.objects.get(id=trip_id)
             except Trip.DoesNotExist:
                 return Response({"detail": "Trip not found"}, status=status.HTTP_404_NOT_FOUND)
             total_s = float(trip.planned_duration_s)
+            current_cycle_hours = float(trip.current_cycle_hours_used)
         else:
             try:
                 total_s = float(duration_s)
-            except (TypeError, ValueError):
-                return Response({"detail": "Invalid duration_s"}, status=status.HTTP_400_BAD_REQUEST)
+                # Allow optional current_cycle_hours_used via query param
+                cycle_param = request.query_params.get("current_cycle_hours_used")
+                if cycle_param:
+                    current_cycle_hours = float(cycle_param)
+            except (TypeError, ValueError) as e:
+                return Response({"detail": f"Invalid parameter: {e}"}, status=status.HTTP_400_BAD_REQUEST)
 
-        logs = generate_eld_logs(total_s)
+        logs = generate_eld_logs(total_s, current_cycle_hours_used=current_cycle_hours)
         return Response({"days": logs})
