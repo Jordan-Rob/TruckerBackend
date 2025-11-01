@@ -31,7 +31,8 @@ SECRET_KEY = os.getenv(
 )
 
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = os.getenv("DJANGO_DEBUG", "1") == "1"
+# Set DJANGO_DEBUG=0 in production, or DJANGO_DEBUG=1 for development
+DEBUG = os.getenv("DJANGO_DEBUG", "False").lower() in ("1", "true", "yes")
 
 ALLOWED_HOSTS = os.getenv("DJANGO_ALLOWED_HOSTS", "*").split(",")
 
@@ -138,8 +139,36 @@ REST_FRAMEWORK = {
 
 SPECTACULAR_SETTINGS = {
     "TITLE": "SpotterAI Trip Planner API",
-    "DESCRIPTION": "API for route planning and ELD log generation.",
+    "DESCRIPTION": (
+        "API for truck route planning and ELD (Electronic Logging Device) log generation.\n\n"
+        "**Features:**\n"
+        "- Route calculation between multiple locations using OpenRouteService\n"
+        "- Hours of Service (HOS) compliance for property-carrying drivers\n"
+        "- ELD log generation with daily segments\n"
+        "- Automatic stop planning (fueling, breaks, rest periods)\n\n"
+        "**HOS Rules (Property-Carrying Driver):**\n"
+        "- 70 hours maximum within any rolling 8-day period\n"
+        "- Up to 11 hours driving per day\n"
+        "- 14-hour duty window per day\n"
+        "- 34-hour reset required after reaching 70-hour limit\n\n"
+        "**Assumptions:**\n"
+        "- Property-carrying driver, 70hrs/8days cycle\n"
+        "- No adverse driving conditions\n"
+        "- Fueling at least once every 1,000 miles\n"
+        "- 1 hour for pickup and drop-off\n\n"
+        "**Authentication:**\n"
+        "Currently no authentication required for development. Configure CORS settings via environment variables."
+    ),
     "VERSION": "1.0.0",
+    "SERVE_INCLUDE_SCHEMA": True,
+    "COMPONENT_SPLIT_REQUEST": True,
+    "COMPONENT_NO_READ_ONLY_REQUIRED": True,
+    "SCHEMA_PATH_PREFIX": "/api",
+    "TAGS": [
+        {"name": "Health", "description": "Health check endpoints"},
+        {"name": "Trip Planning", "description": "Route planning and trip management"},
+        {"name": "ELD Logs", "description": "Electronic Logging Device log generation"},
+    ],
 }
 
 # CORS configuration (relaxed for dev)

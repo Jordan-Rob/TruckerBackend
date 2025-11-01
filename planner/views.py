@@ -1,8 +1,16 @@
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework import status
+from drf_spectacular.utils import extend_schema, OpenApiParameter, OpenApiExample
+from drf_spectacular.types import OpenApiTypes
 
-from .serializers import PlanTripRequestSerializer, PlanTripResponseSerializer, TripSerializer
+from .serializers import (
+    PlanTripRequestSerializer,
+    PlanTripResponseSerializer,
+    TripSerializer,
+    ELDDaySerializer,
+    ELDLogsResponseSerializer,
+)
 from .services.route_service import RouteService, RouteServiceError, NotRoutableError
 from .models import Trip
 from .services.eld_service import generate_eld_logs
@@ -12,11 +20,134 @@ class HealthCheckView(APIView):
     authentication_classes = []
     permission_classes = []
 
+    @extend_schema(
+        summary="Health check",
+        description="Check if the API is running and healthy.",
+        responses={
+            200: {
+                "type": "object",
+                "properties": {
+                    "status": {"type": "string", "example": "ok"}
+                }
+            }
+        },
+        tags=["Health"]
+    )
     def get(self, request):
         return Response({"status": "ok"})
 
 
 class PlanTripView(APIView):
+    @extend_schema(
+        summary="Plan a trip",
+        description="""
+        Plan a truck route between current location, pickup, and dropoff points.
+        
+        **Features:**
+        - Calculates route using OpenRouteService
+        - Plans fueling stops (at least once every 1,000 miles)
+        - Estimates trip duration including 1 hour for pickup and 1 hour for dropoff
+        - Respects HOS rules for property-carrying drivers (70hrs/8days)
+        
+        **Query Parameters:**
+        - `save=1` or `save=true`: Persist the trip in the database (returns trip object in response)
+        
+        **Assumptions:**
+        - Property-carrying driver, 70hrs/8days cycle
+        - No adverse driving conditions
+        - Fueling at least once every 1,000 miles
+        - 1 hour for pickup and drop-off
+        """,
+        request=PlanTripRequestSerializer,
+        responses={
+            200: PlanTripResponseSerializer,
+            400: {
+                "type": "object",
+                "properties": {
+                    "detail": {"type": "string"},
+                    "field_name": {"type": "array", "items": {"type": "string"}}
+                }
+            },
+            422: {
+                "type": "object",
+                "properties": {
+                    "detail": {"type": "string"},
+                    "hint": {"type": "string"},
+                    "reason": {"type": "string"}
+                }
+            },
+            502: {
+                "type": "object",
+                "properties": {
+                    "detail": {"type": "string"}
+                }
+            },
+            503: {
+                "type": "object",
+                "properties": {
+                    "detail": {"type": "string"}
+                }
+            }
+        },
+        examples=[
+            OpenApiExample(
+                "Example Request",
+                value={
+                    "current_location": {"lat": 40.7128, "lon": -74.0060},
+                    "pickup_location": {"lat": 39.9526, "lon": -75.1652},
+                    "dropoff_location": {"lat": 41.8781, "lon": -87.6298},
+                    "current_cycle_hours_used": 10.0
+                },
+                request_only=True
+            ),
+            OpenApiExample(
+                "Example Response",
+                value={
+                    "distance_m": 160934.4,
+                    "duration_s": 36000.0,
+                    "geometry": {
+                        "type": "LineString",
+                        "coordinates": [[-74.0060, 40.7128], [-75.1652, 39.9526]]
+                    },
+                    "segments": [],
+                    "stops": {
+                        "fueling_stops": 0,
+                        "estimated_days": 1,
+                        "required_breaks": 1
+                    },
+                    "trip": {
+                        "id": 1,
+                        "created_at": "2024-01-15T10:00:00Z",
+                        "current_lat": 40.7128,
+                        "current_lon": -74.0060,
+                        "pickup_lat": 39.9526,
+                        "pickup_lon": -75.1652,
+                        "dropoff_lat": 41.8781,
+                        "dropoff_lon": -87.6298,
+                        "current_cycle_hours_used": 10.0,
+                        "planned_distance_m": 160934.4,
+                        "planned_duration_s": 36000.0,
+                        "geometry": {"type": "LineString", "coordinates": []}
+                    }
+                },
+                response_only=True
+            )
+        ],
+        tags=["Trip Planning"],
+        parameters=[
+            OpenApiParameter(
+                name="save",
+                type=OpenApiTypes.BOOL,
+                location=OpenApiParameter.QUERY,
+                description="If true, persist the trip in the database (returns trip object in response)",
+                required=False,
+                examples=[
+                    OpenApiExample("Save trip", value=True),
+                    OpenApiExample("Don't save", value=False),
+                ]
+            ),
+        ]
+    )
     def post(self, request):
         serializer = PlanTripRequestSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
@@ -91,12 +222,94 @@ class PlanTripView(APIView):
 
 
 class ELDLogsView(APIView):
+    @extend_schema(
+        summary="Generate ELD logs",
+        description="""
+        Generate daily ELD (Electronic Logging Device) logs for a trip.
+        
+        **Query Parameters (one required):**
+        - `trip_id`: ID of a saved trip (automatically uses trip's duration and cycle hours)
+        - `duration_s`: Trip duration in seconds (for trips not saved in database)
+        - `current_cycle_hours_used`: Optional, hours used in 70-hour/8-day cycle (only used with duration_s)
+        
+        **Response:**
+        Returns an array of daily logs, each containing:
+        - `segments`: Array of duty status segments (start hour, end hour, status code)
+        - `note`: Optional note for special cases (e.g., 34-hour reset required)
+        
+        **Status Codes:**
+        - 1: Off Duty
+        - 2: Sleeper Berth
+        - 3: Driving
+        - 4: On Duty (not driving)
+        
+        **HOS Rules Enforced:**
+        - Property-carrying driver: 70 hours maximum within any rolling 8-day period
+        - Up to 11 hours driving per day
+        - 14-hour duty window per day
+        - 34-hour reset required after reaching 70-hour limit
+        """,
+        parameters=[
+            OpenApiParameter(
+                name="trip_id",
+                type=OpenApiTypes.INT,
+                location=OpenApiParameter.QUERY,
+                description="ID of a saved trip",
+                required=False
+            ),
+            OpenApiParameter(
+                name="duration_s",
+                type=OpenApiTypes.FLOAT,
+                location=OpenApiParameter.QUERY,
+                description="Trip duration in seconds (if trip not saved)",
+                required=False
+            ),
+            OpenApiParameter(
+                name="current_cycle_hours_used",
+                type=OpenApiTypes.FLOAT,
+                location=OpenApiParameter.QUERY,
+                description="Hours already used in current 70-hour cycle (only used with duration_s)",
+                required=False
+            ),
+        ],
+        responses={
+            200: ELDLogsResponseSerializer,
+            400: {
+                "type": "object",
+                "properties": {
+                    "detail": {"type": "string"}
+                }
+            },
+            404: {
+                "type": "object",
+                "properties": {
+                    "detail": {"type": "string"}
+                }
+            }
+        },
+        examples=[
+            OpenApiExample(
+                "Example Response",
+                value={
+                    "days": [
+                        {
+                            "segments": [
+                                {"start": 0.0, "end": 0.5, "status": 4},
+                                {"start": 0.5, "end": 8.5, "status": 3},
+                                {"start": 8.5, "end": 9.0, "status": 1},
+                                {"start": 9.0, "end": 11.0, "status": 3},
+                                {"start": 11.0, "end": 11.5, "status": 4},
+                                {"start": 11.5, "end": 24.0, "status": 1}
+                            ]
+                        }
+                    ]
+                },
+                response_only=True
+            )
+        ],
+        tags=["ELD Logs"]
+    )
     def get(self, request):
-        """
-        Generate logs from either a trip id or a provided duration_s.
-        - Query: trip_id=<id> OR duration_s=<seconds>
-        - Uses current_cycle_hours_used from trip or query param for 70hr/8day cycle enforcement
-        """
         trip_id = request.query_params.get("trip_id")
         duration_s = request.query_params.get("duration_s")
         if not trip_id and not duration_s:
